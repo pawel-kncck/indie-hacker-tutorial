@@ -87,6 +87,16 @@ serve(async (req) => {
     }
 
     // Call OpenAI Whisper API
+    // ⚠️ SECURITY WARNING: API keys must NEVER be exposed to the client!
+    // - Always call external APIs from Edge Functions (server-side)
+    // - Store API keys in Supabase Secrets, not in client code
+    // - Never include API keys in your React Native / Expo app bundle
+    // - The OPENAI_API_KEY is stored securely using `supabase secrets set`
+    const openaiApiKey = Deno.env.get('OPENAI_API_KEY');
+    if (!openaiApiKey) {
+      throw new Error('OPENAI_API_KEY is not configured. Set it using: supabase secrets set OPENAI_API_KEY=sk-xxx');
+    }
+
     const formData = new FormData();
     formData.append('file', audioData, 'audio.m4a');
     formData.append('model', 'whisper-1');
@@ -97,7 +107,7 @@ serve(async (req) => {
       {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${Deno.env.get('OPENAI_API_KEY')}`,
+          Authorization: `Bearer ${openaiApiKey}`,
         },
         body: formData,
       }
@@ -219,12 +229,18 @@ serve(async (req) => {
     }
 
     // Generate summary with GPT-4
+    // ⚠️ SECURITY: API key is accessed server-side only via Supabase Secrets
+    const openaiApiKey = Deno.env.get('OPENAI_API_KEY');
+    if (!openaiApiKey) {
+      throw new Error('OPENAI_API_KEY is not configured');
+    }
+
     const gptResponse = await fetch(
       'https://api.openai.com/v1/chat/completions',
       {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${Deno.env.get('OPENAI_API_KEY')}`,
+          Authorization: `Bearer ${openaiApiKey}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -374,14 +390,35 @@ const createNote = async (
       .update({ audio_path: path, status: 'processing' })
       .eq('id', note.id);
 
-    // Invoke transcription function
-    const { error: fnError } = await supabase.functions.invoke('transcribe', {
-      body: { noteId: note.id },
-    });
+    // Invoke transcription function with comprehensive error handling
+    try {
+      const { data, error: fnError } = await supabase.functions.invoke('transcribe', {
+        body: { noteId: note.id },
+      });
 
-    if (fnError) {
-      console.error('Function error:', fnError);
-      // Don't throw - let it process in background
+      if (fnError) {
+        console.error('Transcription function error:', fnError);
+        // Update note status to error so it doesn't get stuck in 'processing'
+        await supabase
+          .from('notes')
+          .update({
+            status: 'error',
+            error_message: `Transcription failed: ${fnError.message}`,
+          })
+          .eq('id', note.id);
+      }
+    } catch (fnError) {
+      // Network error or function timeout - mark as error
+      console.error('Failed to invoke transcription function:', fnError);
+      await supabase
+        .from('notes')
+        .update({
+          status: 'error',
+          error_message: fnError instanceof Error
+            ? `Transcription service unavailable: ${fnError.message}`
+            : 'Transcription service unavailable',
+        })
+        .eq('id', note.id);
     }
 
     return { ...note, audio_path: path, status: 'processing' };

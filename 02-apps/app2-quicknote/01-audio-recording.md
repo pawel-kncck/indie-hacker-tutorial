@@ -165,8 +165,11 @@ export function useRecording() {
         clearInterval(intervalRef.current);
       }
 
-      await recordingRef.current.stopAndUnloadAsync();
+      // IMPORTANT: Get URI BEFORE calling stopAndUnloadAsync()
+      // stopAndUnloadAsync() may clear the URI, causing a race condition
       const uri = recordingRef.current.getURI();
+
+      await recordingRef.current.stopAndUnloadAsync();
 
       setState('stopped');
       recordingRef.current = null;

@@ -30,9 +30,11 @@ create table habits (
 );
 
 -- Daily completions
+-- NOTE: user_id is denormalized for RLS performance (avoids subquery joins)
 create table completions (
   id uuid default gen_random_uuid() primary key,
   habit_id uuid references habits(id) on delete cascade not null,
+  user_id uuid references auth.users(id) on delete cascade not null,
   completed_date date not null,
   created_at timestamptz default now(),
 
@@ -44,6 +46,8 @@ create table completions (
 create index idx_habits_user on habits(user_id);
 create index idx_completions_habit on completions(habit_id);
 create index idx_completions_date on completions(completed_date);
+-- Important: Index on user_id for RLS policy performance
+create index idx_completions_user on completions(user_id);
 
 -- Row Level Security
 alter table habits enable row level security;
@@ -54,13 +58,26 @@ create policy "Users manage own habits"
   on habits for all
   using (auth.uid() = user_id);
 
-create policy "Users manage completions for own habits"
+-- Optimized policy: Direct user_id check instead of subquery
+-- This is much faster than joining to habits table for each row
+create policy "Users manage own completions"
   on completions for all
-  using (
-    habit_id in (
-      select id from habits where user_id = auth.uid()
-    )
-  );
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+-- Trigger to auto-populate user_id from habit on insert
+create or replace function set_completion_user_id()
+returns trigger as $$
+begin
+  select user_id into new.user_id from habits where id = new.habit_id;
+  return new;
+end;
+$$ language plpgsql security definer;
+
+create trigger completion_set_user_id
+before insert on completions
+for each row
+execute function set_completion_user_id();
 ```
 
 ## Step 2: Generate TypeScript Types
@@ -193,8 +210,8 @@ export function useHabits() {
 
       if (error) throw error;
       setHabits(data || []);
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An unexpected error occurred');
     } finally {
       setLoading(false);
     }
@@ -311,32 +328,54 @@ export function useCompletions(habitIds: string[], dateRange?: { start: string; 
     fetchCompletions();
   }, [fetchCompletions]);
 
+  // Track which habits are currently being toggled to prevent double-submissions
+  const [togglingHabits, setTogglingHabits] = useState<Set<string>>(new Set());
+
+  const isToggling = (habitId: string) => togglingHabits.has(habitId);
+
   const toggleCompletion = async (habitId: string, date: string) => {
-    const existing = completions.find(
-      (c) => c.habit_id === habitId && c.completed_date === date
-    );
+    // Prevent double-submissions
+    if (togglingHabits.has(habitId)) {
+      return null;
+    }
 
-    if (existing) {
-      // Remove completion
-      const { error } = await supabase
-        .from('completions')
-        .delete()
-        .eq('id', existing.id);
+    // Add to loading state
+    setTogglingHabits((prev) => new Set(prev).add(habitId));
 
-      if (error) throw error;
-      setCompletions((prev) => prev.filter((c) => c.id !== existing.id));
-      return false;
-    } else {
-      // Add completion
-      const { data, error } = await supabase
-        .from('completions')
-        .insert({ habit_id: habitId, completed_date: date })
-        .select()
-        .single();
+    try {
+      const existing = completions.find(
+        (c) => c.habit_id === habitId && c.completed_date === date
+      );
 
-      if (error) throw error;
-      setCompletions((prev) => [...prev, data]);
-      return true;
+      if (existing) {
+        // Remove completion
+        const { error } = await supabase
+          .from('completions')
+          .delete()
+          .eq('id', existing.id);
+
+        if (error) throw error;
+        setCompletions((prev) => prev.filter((c) => c.id !== existing.id));
+        return false;
+      } else {
+        // Add completion
+        const { data, error } = await supabase
+          .from('completions')
+          .insert({ habit_id: habitId, completed_date: date })
+          .select()
+          .single();
+
+        if (error) throw error;
+        setCompletions((prev) => [...prev, data]);
+        return true;
+      }
+    } finally {
+      // Remove from loading state
+      setTogglingHabits((prev) => {
+        const next = new Set(prev);
+        next.delete(habitId);
+        return next;
+      });
     }
   };
 
@@ -351,6 +390,7 @@ export function useCompletions(habitIds: string[], dateRange?: { start: string; 
     loading,
     toggleCompletion,
     isCompleted,
+    isToggling,  // Expose loading state for individual habits
     refetch: fetchCompletions,
   };
 }
@@ -360,12 +400,38 @@ export function useCompletions(habitIds: string[], dateRange?: { start: string; 
 
 Add streak calculation utility in `lib/streaks.ts`:
 
+First, install date-fns for proper timezone handling:
+
+```bash
+npm install date-fns date-fns-tz
+```
+
 ```typescript
 import { Completion } from '@/types/supabase';
+import { format, subDays, differenceInCalendarDays } from 'date-fns';
+import { toZonedTime } from 'date-fns-tz';
+
+/**
+ * Get user's local date string accounting for timezone
+ * This prevents streak breaks caused by server/client timezone differences
+ */
+function getLocalDateString(timezone?: string): string {
+  const tz = timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const zonedDate = toZonedTime(new Date(), tz);
+  return format(zonedDate, 'yyyy-MM-dd');
+}
+
+function getYesterdayString(timezone?: string): string {
+  const tz = timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const zonedDate = toZonedTime(new Date(), tz);
+  const yesterday = subDays(zonedDate, 1);
+  return format(yesterday, 'yyyy-MM-dd');
+}
 
 export function calculateStreak(
   habitId: string,
-  completions: Completion[]
+  completions: Completion[],
+  userTimezone?: string
 ): { current: number; longest: number } {
   const habitCompletions = completions
     .filter((c) => c.habit_id === habitId)
@@ -377,8 +443,9 @@ export function calculateStreak(
     return { current: 0, longest: 0 };
   }
 
-  const today = new Date().toISOString().split('T')[0];
-  const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+  // Use timezone-aware date calculation
+  const today = getLocalDateString(userTimezone);
+  const yesterday = getYesterdayString(userTimezone);
 
   // Current streak
   let currentStreak = 0;
@@ -392,26 +459,24 @@ export function calculateStreak(
     for (const date of habitCompletions) {
       if (date === checkDate) {
         currentStreak++;
-        // Go to previous day
-        const d = new Date(checkDate);
-        d.setDate(d.getDate() - 1);
-        checkDate = d.toISOString().split('T')[0];
+        // Go to previous day using proper date math
+        const d = new Date(checkDate + 'T12:00:00'); // Use noon to avoid DST issues
+        const prevDay = subDays(d, 1);
+        checkDate = format(prevDay, 'yyyy-MM-dd');
       } else if (date < checkDate) {
         break;
       }
     }
   }
 
-  // Longest streak
+  // Longest streak - use differenceInCalendarDays for proper calculation
   let longestStreak = 0;
   let tempStreak = 1;
 
   for (let i = 0; i < habitCompletions.length - 1; i++) {
-    const current = new Date(habitCompletions[i]);
-    const next = new Date(habitCompletions[i + 1]);
-    const diffDays = Math.floor(
-      (current.getTime() - next.getTime()) / 86400000
-    );
+    const current = new Date(habitCompletions[i] + 'T12:00:00');
+    const next = new Date(habitCompletions[i + 1] + 'T12:00:00');
+    const diffDays = differenceInCalendarDays(current, next);
 
     if (diffDays === 1) {
       tempStreak++;
@@ -642,8 +707,9 @@ export default function NewHabitScreen() {
     try {
       await createHabit(name.trim(), color);
       router.back();
-    } catch (error: any) {
-      Alert.alert('Error', error.message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to create habit';
+      Alert.alert('Error', message);
     } finally {
       setLoading(false);
     }
