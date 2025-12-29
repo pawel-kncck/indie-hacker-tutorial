@@ -22,19 +22,41 @@ Once ready, go to **Settings → API**:
 
 ```
 Project URL: https://xxxxx.supabase.co
-anon (public) key: eyJhbGciOiJIUzI1NiIs...
-service_role key: eyJhbGciOiJIUzI1NiIs...  # Keep secret!
+Publishable key: sb_publishable_xxxxxxxxxxxx
+Secret key: sb_secret_xxxxxxxxxxxx  # Keep secret!
 ```
 
-- **anon key**: Safe for client-side, limited by Row Level Security
-- **service_role key**: Bypasses RLS, never expose to client
+> **API Keys (2025 Update):** Supabase has transitioned to a new key system:
+>
+> | New Key | Legacy Key | Purpose |
+> |---------|------------|---------|
+> | `sb_publishable_...` | `anon` key | Client-side use, limited by RLS |
+> | `sb_secret_...` | `service_role` key | Server-side only, bypasses RLS |
+>
+> **Key Differences:**
+> - **Instant revocation**: New keys can be instantly revoked by deletion
+> - **Browser protection**: Secret keys return HTTP 401 if used in browsers
+> - **No JWT verification**: New keys are not JWTs (affects Edge Functions with `verify_jwt=true`)
+>
+> **Migration Timeline:**
+> - **November 2025**: Monthly reminders begin; restored projects lose legacy keys
+> - **Late 2026**: Legacy keys permanently deleted
+>
+> New projects should use the new `sb_publishable_...` and `sb_secret_...` formats.
 
 ---
 
 ## Client Setup in Expo
 
 ```bash
-npx expo install @supabase/supabase-js
+npx expo install @supabase/supabase-js expo-secure-store
+```
+
+Create `.env` in your project root:
+
+```env
+EXPO_PUBLIC_SUPABASE_URL=https://xxxxx.supabase.co
+EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_xxxxxxxxxxxx
 ```
 
 Create `lib/supabase.ts`:
@@ -42,18 +64,47 @@ Create `lib/supabase.ts`:
 ```typescript
 import { createClient } from '@supabase/supabase-js';
 import * as SecureStore from 'expo-secure-store';
+import { Platform } from 'react-native';
 
-const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL!;
-const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY!;
-
-// Custom storage for auth tokens (secure on mobile)
+// Custom storage for auth tokens (secure on mobile, localStorage on web)
 const ExpoSecureStoreAdapter = {
-  getItem: (key: string) => SecureStore.getItemAsync(key),
-  setItem: (key: string, value: string) => SecureStore.setItemAsync(key, value),
-  removeItem: (key: string) => SecureStore.deleteItemAsync(key),
+  getItem: async (key: string) => {
+    if (Platform.OS === 'web') {
+      return localStorage.getItem(key);
+    }
+    return SecureStore.getItemAsync(key);
+  },
+  setItem: async (key: string, value: string) => {
+    if (Platform.OS === 'web') {
+      localStorage.setItem(key, value);
+      return;
+    }
+    await SecureStore.setItemAsync(key, value);
+  },
+  removeItem: async (key: string) => {
+    if (Platform.OS === 'web') {
+      localStorage.removeItem(key);
+      return;
+    }
+    await SecureStore.deleteItemAsync(key);
+  },
 };
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+// Validate environment variables
+const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
+// Support both new publishable key and legacy anon key
+const supabaseKey =
+  process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+  process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+
+if (!supabaseUrl || !supabaseKey) {
+  throw new Error(
+    'Missing Supabase credentials. Set EXPO_PUBLIC_SUPABASE_URL and ' +
+    'EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY in your .env file.'
+  );
+}
+
+export const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
     storage: ExpoSecureStoreAdapter,
     autoRefreshToken: true,
@@ -419,24 +470,25 @@ serve(async (req) => {
   try {
     // Get auth header
     const authHeader = req.headers.get('Authorization');
-    
+
     // Create Supabase client with user's token
+    // Note: SUPABASE_ANON_KEY is automatically set (or SUPABASE_PUBLISHABLE_KEY for new projects)
     const supabase = createClient(
       Deno.env.get('SUPABASE_URL')!,
-      Deno.env.get('SUPABASE_ANON_KEY')!,
+      Deno.env.get('SUPABASE_ANON_KEY')! || Deno.env.get('SUPABASE_PUBLISHABLE_KEY')!,
       { global: { headers: { Authorization: authHeader! } } }
     );
-    
+
     // Get user
     const { data: { user }, error: userError } = await supabase.auth.getUser();
     if (userError) throw userError;
-    
+
     // Parse request body
     const { message } = await req.json();
-    
+
     // Do something...
     const result = { echo: message, userId: user?.id };
-    
+
     return new Response(JSON.stringify(result), {
       headers: { 'Content-Type': 'application/json' },
     });
@@ -448,6 +500,11 @@ serve(async (req) => {
   }
 });
 ```
+
+> **Edge Functions with New API Keys:**
+> - `SUPABASE_SERVICE_ROLE_KEY` becomes `SUPABASE_SECRET_KEY` for new projects
+> - New secret keys (`sb_secret_...`) cannot be verified as JWTs
+> - If using `verify_jwt=true` in `config.toml`, you'll need to handle auth manually for secret key requests
 
 ### Deploy
 
@@ -507,7 +564,8 @@ Then use in client:
 ```typescript
 import { Database } from '@/types/supabase';
 
-const supabase = createClient<Database>(supabaseUrl, supabaseAnonKey);
+// Use publishable key for new projects, anon key for legacy
+const supabase = createClient<Database>(supabaseUrl, supabaseKey);
 
 // Now you get full type inference
 const { data } = await supabase.from('habits').select('*');
