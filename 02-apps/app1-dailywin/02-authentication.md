@@ -70,8 +70,16 @@ const ExpoSecureStoreAdapter = {
   },
 };
 
-const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL!;
-const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY!;
+// Validate environment variables before creating client
+const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
+const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+
+if (!supabaseUrl || !supabaseAnonKey) {
+  throw new Error(
+    'Missing Supabase credentials. Please check your .env file and ensure ' +
+    'EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY are set.'
+  );
+}
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
@@ -210,8 +218,9 @@ export default function LoginScreen() {
     try {
       await signIn(email, password);
       router.replace('/(app)/(tabs)');
-    } catch (error: any) {
-      Alert.alert('Error', error.message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'An unexpected error occurred';
+      Alert.alert('Error', message);
     } finally {
       setLoading(false);
     }
@@ -365,9 +374,38 @@ export default function SignupScreen() {
   const [loading, setLoading] = useState(false);
   const { signUp } = useAuth();
 
+  const validateEmail = (email: string): boolean => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
+  };
+
+  const validatePassword = (password: string): { valid: boolean; message: string } => {
+    if (password.length < 8) {
+      return { valid: false, message: 'Password must be at least 8 characters' };
+    }
+
+    const hasUpperCase = /[A-Z]/.test(password);
+    const hasLowerCase = /[a-z]/.test(password);
+    const hasNumbers = /\d/.test(password);
+
+    if (!hasUpperCase || !hasLowerCase || !hasNumbers) {
+      return {
+        valid: false,
+        message: 'Password must contain uppercase, lowercase, and numbers'
+      };
+    }
+
+    return { valid: true, message: '' };
+  };
+
   const handleSignup = async () => {
     if (!email || !password || !confirmPassword) {
       Alert.alert('Error', 'Please fill in all fields');
+      return;
+    }
+
+    if (!validateEmail(email)) {
+      Alert.alert('Error', 'Please enter a valid email address');
       return;
     }
 
@@ -376,8 +414,9 @@ export default function SignupScreen() {
       return;
     }
 
-    if (password.length < 6) {
-      Alert.alert('Error', 'Password must be at least 6 characters');
+    const passwordValidation = validatePassword(password);
+    if (!passwordValidation.valid) {
+      Alert.alert('Error', passwordValidation.message);
       return;
     }
 
@@ -389,8 +428,9 @@ export default function SignupScreen() {
         'We sent you a confirmation link to verify your account.',
         [{ text: 'OK', onPress: () => router.replace('/(auth)/login') }]
       );
-    } catch (error: any) {
-      Alert.alert('Error', error.message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'An unexpected error occurred';
+      Alert.alert('Error', message);
     } finally {
       setLoading(false);
     }
@@ -553,8 +593,9 @@ export default function ForgotPasswordScreen() {
         'We sent you a password reset link.',
         [{ text: 'OK', onPress: () => router.back() }]
       );
-    } catch (error: any) {
-      Alert.alert('Error', error.message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'An unexpected error occurred';
+      Alert.alert('Error', message);
     } finally {
       setLoading(false);
     }

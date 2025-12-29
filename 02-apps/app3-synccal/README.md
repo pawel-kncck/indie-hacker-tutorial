@@ -79,18 +79,66 @@ create table events (
   unique(calendar_id, google_event_id)
 );
 
--- OAuth tokens (encrypted)
+-- OAuth tokens (encrypted using pgsodium)
+-- IMPORTANT: Enable pgsodium extension first for token encryption
+-- This protects tokens at rest in the database
+
+-- Enable pgsodium extension
+create extension if not exists pgsodium;
+
+-- Create encryption key for OAuth tokens
+select pgsodium.create_key(
+  name := 'oauth_tokens_key',
+  key_type := 'aead-det'
+);
+
 create table oauth_tokens (
   id uuid default gen_random_uuid() primary key,
   user_id uuid references auth.users(id) on delete cascade unique,
   provider text not null default 'google',
-  access_token text not null, -- Encrypted
-  refresh_token text not null, -- Encrypted
+  -- Tokens are encrypted using pgsodium transparent column encryption
+  access_token bytea not null,
+  refresh_token bytea not null,
   expires_at timestamptz not null,
   scope text,
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
+
+-- Create security label for transparent column encryption
+security label for pgsodium on column oauth_tokens.access_token is
+  'ENCRYPT WITH KEY ID (select id from pgsodium.valid_key where name = ''oauth_tokens_key'') SECURITY INVOKER';
+
+security label for pgsodium on column oauth_tokens.refresh_token is
+  'ENCRYPT WITH KEY ID (select id from pgsodium.valid_key where name = ''oauth_tokens_key'') SECURITY INVOKER';
+
+-- Create view for decrypted access (only accessible to authenticated users via RLS)
+create view oauth_tokens_decrypted as
+  select
+    id,
+    user_id,
+    provider,
+    convert_from(
+      pgsodium.crypto_aead_det_decrypt(
+        access_token,
+        '',
+        (select id from pgsodium.valid_key where name = 'oauth_tokens_key')
+      ),
+      'utf8'
+    ) as access_token,
+    convert_from(
+      pgsodium.crypto_aead_det_decrypt(
+        refresh_token,
+        '',
+        (select id from pgsodium.valid_key where name = 'oauth_tokens_key')
+      ),
+      'utf8'
+    ) as refresh_token,
+    expires_at,
+    scope,
+    created_at,
+    updated_at
+  from oauth_tokens;
 
 -- Push notification tokens
 create table push_tokens (

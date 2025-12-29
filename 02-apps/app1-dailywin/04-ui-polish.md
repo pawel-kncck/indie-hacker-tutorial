@@ -175,16 +175,32 @@ export function HabitCard({
       onPress={onToggle}
       onLongPress={onLongPress}
       activeOpacity={0.8}
+      // Accessibility props - essential for screen reader users
+      accessible={true}
+      accessibilityRole="button"
+      accessibilityLabel={`${name} habit`}
+      accessibilityState={{ checked: completed }}
+      accessibilityHint={
+        completed
+          ? 'Double tap to mark as incomplete. Long press for options.'
+          : 'Double tap to mark as complete. Long press for options.'
+      }
     >
       <View style={styles.content}>
         <Text
           style={[styles.name, completed && styles.nameCompleted]}
           numberOfLines={1}
+          accessibilityElementsHidden={true} // Parent handles accessibility
         >
           {name}
         </Text>
       </View>
-      <CheckButton completed={completed} color={color} onPress={onToggle} />
+      <CheckButton
+        completed={completed}
+        color={color}
+        onPress={onToggle}
+        accessibilityLabel={completed ? 'Completed' : 'Not completed'}
+      />
     </AnimatedTouchable>
   );
 }
@@ -582,18 +598,147 @@ const styles = StyleSheet.create({
 });
 ```
 
+## Step 10: Error Boundary
+
+**Critical**: React Native apps without error boundaries crash entirely on any unhandled error. Add an error boundary to gracefully handle errors.
+
+Create `components/ErrorBoundary.tsx`:
+
+```tsx
+import React, { Component, ReactNode } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+
+type Props = {
+  children: ReactNode;
+  fallback?: ReactNode;
+};
+
+type State = {
+  hasError: boolean;
+  error: Error | null;
+};
+
+export class ErrorBoundary extends Component<Props, State> {
+  constructor(props: Props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): State {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    // Log error to your error reporting service (e.g., Sentry)
+    console.error('ErrorBoundary caught an error:', error, errorInfo);
+  }
+
+  handleRetry = () => {
+    this.setState({ hasError: false, error: null });
+  };
+
+  render() {
+    if (this.state.hasError) {
+      if (this.props.fallback) {
+        return this.props.fallback;
+      }
+
+      return (
+        <View style={styles.container}>
+          <Ionicons name="warning-outline" size={64} color="#EF4444" />
+          <Text style={styles.title}>Something went wrong</Text>
+          <Text style={styles.message}>
+            {this.state.error?.message || 'An unexpected error occurred'}
+          </Text>
+          <TouchableOpacity style={styles.button} onPress={this.handleRetry}>
+            <Text style={styles.buttonText}>Try Again</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+    backgroundColor: '#fff',
+  },
+  title: {
+    fontSize: 20,
+    fontWeight: '600',
+    color: '#1F2937',
+    marginTop: 16,
+  },
+  message: {
+    fontSize: 14,
+    color: '#6B7280',
+    textAlign: 'center',
+    marginTop: 8,
+    marginBottom: 24,
+  },
+  button: {
+    backgroundColor: '#3B82F6',
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 8,
+  },
+  buttonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+});
+```
+
+Update your root layout `app/_layout.tsx` to wrap the app:
+
+```tsx
+import { ErrorBoundary } from '@/components/ErrorBoundary';
+
+export default function RootLayout() {
+  return (
+    <ErrorBoundary>
+      <AuthProvider>
+        <Stack>
+          {/* ... your screens */}
+        </Stack>
+      </AuthProvider>
+    </ErrorBoundary>
+  );
+}
+```
+
+You can also wrap individual screens or components:
+
+```tsx
+// Wrap a specific screen that might error
+<ErrorBoundary fallback={<Text>Failed to load habits</Text>}>
+  <HabitsList />
+</ErrorBoundary>
+```
+
 ---
 
 ## Checkpoint
 
 Before moving on, verify:
 
+- [ ] Error boundary catches and displays errors gracefully
 - [ ] Check animations play smoothly
 - [ ] Haptic feedback works on mobile
 - [ ] Loading skeleton appears while fetching
 - [ ] Pull-to-refresh works
 - [ ] Progress screen shows streaks
 - [ ] App feels responsive and polished
+- [ ] VoiceOver/TalkBack correctly reads habit names and states
+- [ ] All interactive elements have appropriate accessibility labels
 
 ---
 

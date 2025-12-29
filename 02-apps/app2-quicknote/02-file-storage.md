@@ -103,27 +103,63 @@ async function uploadNative(
   storagePath: string,
   onProgress?: (progress: UploadProgress) => void
 ): Promise<UploadResult> {
-  // Read file as base64
-  const base64 = await FileSystem.readAsStringAsync(localUri, {
-    encoding: FileSystem.EncodingType.Base64,
-  });
-
-  // Get file info for progress
+  // Get file info for progress tracking
   const fileInfo = await FileSystem.getInfoAsync(localUri);
   const fileSize = fileInfo.exists ? fileInfo.size || 0 : 0;
 
-  // Convert to ArrayBuffer
-  const arrayBuffer = decode(base64);
+  // IMPORTANT: Avoid base64 encoding for large files to prevent OOM crashes
+  // Base64 increases memory usage by ~33% (50MB file = 67MB base64 string + original = 117MB minimum)
+  // Instead, use FormData with file URI directly on native platforms
 
-  // Upload to Supabase
-  const { data, error } = await supabase.storage
-    .from('audio')
-    .upload(storagePath, arrayBuffer, {
-      contentType: getContentType(storagePath),
-      upsert: false,
+  // For files over 5MB, use chunked upload or streaming approach
+  const LARGE_FILE_THRESHOLD = 5 * 1024 * 1024; // 5MB
+
+  if (fileSize > LARGE_FILE_THRESHOLD) {
+    // Use FormData approach which handles file streaming internally
+    // This avoids loading the entire file into memory as base64
+    const formData = new FormData();
+    formData.append('file', {
+      uri: localUri,
+      name: storagePath.split('/').pop() || 'audio.m4a',
+      type: getContentType(storagePath),
+    } as any);
+
+    // Use fetch with FormData for memory-efficient upload
+    const { data: { session } } = await supabase.auth.getSession();
+    const response = await fetch(
+      `${supabase.supabaseUrl}/storage/v1/object/audio/${storagePath}`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${session?.access_token}`,
+        },
+        body: formData,
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Upload failed: ${error}`);
+    }
+  } else {
+    // For smaller files, base64 approach is fine
+    const base64 = await FileSystem.readAsStringAsync(localUri, {
+      encoding: FileSystem.EncodingType.Base64,
     });
 
-  if (error) throw error;
+    // Convert to ArrayBuffer
+    const arrayBuffer = decode(base64);
+
+    // Upload to Supabase
+    const { data, error } = await supabase.storage
+      .from('audio')
+      .upload(storagePath, arrayBuffer, {
+        contentType: getContentType(storagePath),
+        upsert: false,
+      });
+
+    if (error) throw error;
+  }
 
   // Get signed URL
   const { data: urlData } = await supabase.storage
@@ -286,29 +322,60 @@ export type Note = {
   updated_at: string;
 };
 
+const PAGE_SIZE = 20; // Limit to prevent performance issues with large datasets
+
 export function useNotes() {
   const { user } = useAuth();
   const [notes, setNotes] = useState<Note[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
 
-  const fetchNotes = useCallback(async () => {
+  const fetchNotes = useCallback(async (reset = true) => {
     if (!user) return;
 
     try {
+      if (reset) {
+        setLoading(true);
+      } else {
+        setLoadingMore(true);
+      }
+
+      // Use range() for pagination - prevents OOM with large datasets
+      const from = reset ? 0 : notes.length;
+      const to = from + PAGE_SIZE - 1;
+
       const { data, error } = await supabase
         .from('notes')
         .select('*')
         .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
+        .order('created_at', { ascending: false })
+        .range(from, to); // Pagination with range()
 
       if (error) throw error;
-      setNotes(data || []);
+
+      // Check if there are more notes to load
+      setHasMore((data?.length || 0) === PAGE_SIZE);
+
+      if (reset) {
+        setNotes(data || []);
+      } else {
+        setNotes((prev) => [...prev, ...(data || [])]);
+      }
     } catch (error) {
       console.error('Error fetching notes:', error);
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
-  }, [user]);
+  }, [user, notes.length]);
+
+  // Load more notes when user scrolls to the bottom
+  const loadMore = useCallback(() => {
+    if (!loadingMore && hasMore) {
+      fetchNotes(false);
+    }
+  }, [fetchNotes, loadingMore, hasMore]);
 
   useEffect(() => {
     fetchNotes();
@@ -433,10 +500,13 @@ export function useNotes() {
   return {
     notes,
     loading,
+    loadingMore,
+    hasMore,
     createNote,
     deleteNote,
     getPlaybackUrl,
-    refetch: fetchNotes,
+    refetch: () => fetchNotes(true),
+    loadMore, // Call when user scrolls to bottom
   };
 }
 ```
@@ -503,7 +573,7 @@ import { useNotes, Note } from '@/hooks/useNotes';
 import { formatDuration } from '@/lib/utils';
 
 export default function NotesListScreen() {
-  const { notes, loading } = useNotes();
+  const { notes, loading, loadingMore, hasMore, loadMore } = useNotes();
 
   if (loading) {
     return (
@@ -526,6 +596,19 @@ export default function NotesListScreen() {
             onPress={() => router.push(`/note/${item.id}`)}
           />
         )}
+        // Pagination - load more when user reaches the end
+        onEndReached={loadMore}
+        onEndReachedThreshold={0.5} // Trigger when 50% from bottom
+        ListFooterComponent={
+          loadingMore ? (
+            <View style={styles.loadingMore}>
+              <ActivityIndicator size="small" color="#3B82F6" />
+              <Text style={styles.loadingMoreText}>Loading more notes...</Text>
+            </View>
+          ) : !hasMore && notes.length > 0 ? (
+            <Text style={styles.endOfList}>No more notes</Text>
+          ) : null
+        }
       />
     </View>
   );
@@ -585,6 +668,9 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F9FAFB' },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   list: { padding: 16, paddingBottom: 100 },
+  loadingMore: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', padding: 16, gap: 8 },
+  loadingMoreText: { color: '#6B7280', fontSize: 14 },
+  endOfList: { textAlign: 'center', color: '#9CA3AF', fontSize: 14, padding: 16 },
   card: {
     backgroundColor: '#fff',
     borderRadius: 12,
