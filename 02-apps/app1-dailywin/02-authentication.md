@@ -19,7 +19,13 @@ We'll implement:
 2. Wait for the project to be provisioned (~2 minutes)
 3. Go to **Settings → API** and copy:
    - Project URL
-   - Anon/Public key
+   - **Publishable key** (`sb_publishable_...`) - This replaces the legacy "anon key"
+
+> **Note on API Keys (2025 Update):** Supabase has introduced a new API key system:
+> - **Publishable key** (`sb_publishable_...`): Safe for client-side use (replaces `anon` key)
+> - **Secret key** (`sb_secret_...`): Server-side only, for Edge Functions and backend services (replaces `service_role` key)
+>
+> Legacy `anon` and `service_role` keys will be deprecated by late 2026. New projects should use the new key formats.
 
 ## Step 2: Configure Environment Variables
 
@@ -27,8 +33,14 @@ Create a `.env` file in your project root:
 
 ```env
 EXPO_PUBLIC_SUPABASE_URL=your_project_url
-EXPO_PUBLIC_SUPABASE_ANON_KEY=your_anon_key
+EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_xxxxxxxxxxxx
 ```
+
+> **Migration Note:** If you're using an older project with legacy keys, you can still use:
+> ```env
+> EXPO_PUBLIC_SUPABASE_ANON_KEY=your_anon_key  # Legacy - works until late 2026
+> ```
+> However, new projects should use `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY`.
 
 Add to `.gitignore`:
 
@@ -72,16 +84,20 @@ const ExpoSecureStoreAdapter = {
 
 // Validate environment variables before creating client
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+// Support both new publishable key (recommended) and legacy anon key
+const supabaseKey =
+  process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+  process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
 
-if (!supabaseUrl || !supabaseAnonKey) {
+if (!supabaseUrl || !supabaseKey) {
   throw new Error(
     'Missing Supabase credentials. Please check your .env file and ensure ' +
-    'EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY are set.'
+    'EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY are set. ' +
+    '(Legacy EXPO_PUBLIC_SUPABASE_ANON_KEY is also supported until late 2026)'
   );
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+export const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
     storage: ExpoSecureStoreAdapter,
     autoRefreshToken: true,

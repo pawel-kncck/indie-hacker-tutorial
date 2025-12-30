@@ -344,6 +344,19 @@ Or via CLI:
 supabase secrets set OPENAI_API_KEY=sk-xxxxx
 ```
 
+> **API Keys in Edge Functions (2025 Update):**
+>
+> Supabase now uses a new key system:
+> - **Secret key** (`sb_secret_...`): Use this in Edge Functions instead of `service_role`
+> - The `SUPABASE_SERVICE_ROLE_KEY` environment variable is automatically set in Edge Functions
+>
+> For new projects, you'll see `sb_secret_...` format keys. These work the same way as
+> the legacy `service_role` key but with improved security features like instant revocation.
+>
+> **Important:** Secret keys cannot be verified as JWTs. If you're using `verify_jwt=true`
+> in your function config, you'll need to handle authentication manually for requests
+> using secret keys.
+
 ## Step 5: Deploy Functions
 
 ```bash
